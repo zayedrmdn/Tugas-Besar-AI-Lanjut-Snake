@@ -86,3 +86,116 @@ class GreedyStrategy(MoveStrategy):
 #     def choose_move(self, snapshot, snake_id, rng):
 #         legal_moves = snapshot.legal_moves_for(snake_id)
 #         return legal_moves[0] if legal_moves else snapshot.snake(snake_id).direction
+
+
+@register_strategy("Greedy Best-First")
+class GreedyBestFirstStrategy(MoveStrategy):
+    def choose_move(self, snapshot, snake_id, rng):
+        import time
+        start_time = time.perf_counter()
+        expanded = 0
+        generated = 0
+
+        snake = snapshot.snake(snake_id)
+        apples = snapshot.apples
+
+        def h(head):
+            return min(abs(head[0] - ax) + abs(head[1] - ay) for ax, ay in apples)
+
+        # each frontier item: (body, first_move)
+        frontier = [(snake.body, None)]
+        visited = {snake.body[0]}
+        result = None
+
+        while frontier and apples and result is None:
+            frontier.sort(key=lambda item: h(item[0][0]))
+            body, first_move = frontier.pop(0)
+            expanded += 1
+
+            for move in Direction:
+                dx, dy = move.vector
+                new_head = (body[0][0] + dx, body[0][1] + dy)
+                if not (0 <= new_head[0] < snapshot.columns and 0 <= new_head[1] < snapshot.rows):
+                    continue
+                if new_head in body[:-1]:
+                    continue
+                new_body = (new_head,) + body[:-1]
+                if new_head in visited:
+                    continue
+                visited.add(new_head)
+                generated += 1
+
+                if first_move is None:
+                    first_move_here = move
+                else:
+                    first_move_here = first_move
+                if new_head in apples:
+                    result = first_move_here
+                    break
+                frontier.append((new_body, first_move_here))
+
+        if result is None:
+            legal_moves = snapshot.legal_moves_for(snake_id)
+            result = legal_moves[0] if legal_moves else snake.direction
+
+        elapsed = time.perf_counter() - start_time
+        print(f"Greedy Best-First: expanded={expanded}, generated={generated}, time={elapsed:.4f}s")
+        return result
+
+
+@register_strategy("A*")
+class AStarStrategy(MoveStrategy):
+    def choose_move(self, snapshot, snake_id, rng):
+        import time
+        start_time = time.perf_counter()
+        expanded = 0
+        generated = 0
+
+        snake = snapshot.snake(snake_id)
+        apples = snapshot.apples
+
+        def h(head):
+            return min(abs(head[0] - ax) + abs(head[1] - ay) for ax, ay in apples)
+
+        # each frontier item: (body, first_move, g)
+        frontier = [(snake.body, None, 0)]
+        visited = set()
+        result = None
+
+        while frontier and apples:
+            frontier.sort(key=lambda item: item[2] + h(item[0][0]))
+            body, first_move, g = frontier.pop(0)
+            if body[0] in visited:
+                continue
+            visited.add(body[0])
+
+            if body[0] in apples:
+                result = first_move
+                break
+            expanded += 1
+
+            for move in Direction:
+                dx, dy = move.vector
+                new_head = (body[0][0] + dx, body[0][1] + dy)
+                if not (0 <= new_head[0] < snapshot.columns and 0 <= new_head[1] < snapshot.rows):
+                    continue
+                if new_head in body[:-1]:
+                    continue
+                new_body = (new_head,) + body[:-1]
+                if new_head in visited:
+                    continue
+                generated += 1
+
+                if first_move is None:
+                    first_move_here = move
+                else:
+                    first_move_here = first_move
+                frontier.append((new_body, first_move_here, g + 1))
+
+        if result is None:
+            legal_moves = snapshot.legal_moves_for(snake_id)
+            result = legal_moves[0] if legal_moves else snake.direction
+
+        elapsed = time.perf_counter() - start_time
+        print(f"A*: expanded={expanded}, generated={generated}, time={elapsed:.4f}s")
+        return result
