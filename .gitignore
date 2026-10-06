@@ -1,3 +1,4 @@
 # Cache
 /snake_game/__pycache__
 .venv
+.idea
