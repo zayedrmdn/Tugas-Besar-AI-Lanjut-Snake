@@ -1,0 +1,3 @@
+.venv
+snake_game/__pycache__
+tests/__pycache__
