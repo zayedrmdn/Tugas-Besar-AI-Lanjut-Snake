@@ -635,294 +635,325 @@ class UCSStrategy(MoveStrategy):
 # ---------------------------------------------------------------------------
 # BFS - Single Player
 # ---------------------------------------------------------------------------
-
-
-def _inside(snapshot: GameSnapshot, p: Position) -> bool:
-    x, y = p
-    return 0 <= x < snapshot.columns and 0 <= y < snapshot.rows
-
-
-def _next_position(p: Position, direction: Direction) -> Position:
-    dx, dy = direction.vector
-    return p[0] + dx, p[1] + dy
-
-
-def _direction_between(a: Position, b: Position) -> Direction:
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    for direction in Direction:
-        if direction.vector == (dx, dy):
-            return direction
-    raise ValueError("Positions are not adjacent")
-
-
 @register_strategy("BFS")
 class BFSStrategy(MoveStrategy):
-    """Breadth-First Search toward the nearest reachable apple.
+    def __init__(self):
+        self.total_expanded = 0
+        self.total_generated = 0
+        self.total_time = 0.0
+        self.total_searches = 0
 
-    The search treats all snake bodies as obstacles. If no apple is reachable,
-    it chooses the legal move leading to the largest reachable free area.
-    """
+    def choose_move(self, snapshot, snake_id, rng):
+        start_time = time.perf_counter()
+        expanded = generated = 0
 
-    def choose_move(self, snapshot: GameSnapshot, snake_id: str, rng: Random) -> Direction:
-        legal = snapshot.legal_moves_for(snake_id)
         snake = snapshot.snake(snake_id)
-        if not legal:
+        apples = set(snapshot.apples)
+        legal_moves = snapshot.legal_moves_for(snake_id)
+
+        if not legal_moves or not apples:
             return snake.direction
-        if not snapshot.apples:
-            return legal[0]
 
-        start = snake.body[0]
-        obstacles = {part for s in snapshot.snakes for part in s.body}
-        # The current head is the BFS start, so it must not be treated as an obstacle.
-        obstacles.discard(start)
+        frontier = deque([(snake.body, None, 0)])
 
-        queue = deque([start])
-        parent: dict[Position, Position | None] = {start: None}
-        target: Position | None = None
+        visited = set()
 
-        # Deterministic order makes demonstrations/tests reproducible.
-        directions = (Direction.UP, Direction.RIGHT, Direction.DOWN, Direction.LEFT)
+        result = None
+        result_cost = 0
 
-        while queue:
-            current = queue.popleft()
-            if current in snapshot.apples:
-                target = current
+        while frontier:
+            body, first_move, cost = frontier.popleft()
+            head = body[0]
+
+            # State sudah pernah dikunjungi
+            if head in visited:
+                continue
+
+            visited.add(head)
+
+            # State dikeluarkan dari queue -> EXPANDED
+            expanded += 1
+
+            if head in apples:
+                result = first_move
+                result_cost = cost
                 break
 
-            for direction in directions:
-                nxt = _next_position(current, direction)
-                if not _inside(snapshot, nxt) or nxt in obstacles or nxt in parent:
+            for move in Direction:
+                dx, dy = move.vector
+                new_head = (
+                    head[0] + dx,
+                    head[1] + dy
+                )
+
+                x, y = new_head
+
+                if not (
+                    0 <= x < snapshot.columns
+                    and
+                    0 <= y < snapshot.rows
+                ):
                     continue
-                parent[nxt] = current
-                queue.append(nxt)
 
-        if target is not None:
-            # Walk backward from apple to head and return the first step.
-            current = target
-            while parent[current] != start:
-                current = parent[current]  # type: ignore[assignment]
-            return _direction_between(start, current)
 
-        # No apple is reachable. Prefer a move with the largest connected area.
-        best_move = legal[0]
-        best_area = -1
-        for move in legal:
-            next_head = _next_position(start, move)
-            area = self._reachable_area(snapshot, next_head, obstacles)
-            if area > best_area:
-                best_area = area
-                best_move = move
-        return best_move
+                new_body = (
+                    (new_head,) + body
+                    if new_head in apples
+                    else (new_head,) + body[:-1]
+                )
 
-    def _reachable_area(
-        self, snapshot: GameSnapshot, start: Position, obstacles: set[Position]
-    ) -> int:
-        if not _inside(snapshot, start) or start in obstacles:
-            return 0
-        queue = deque([start])
-        visited = {start}
-        while queue:
-            current = queue.popleft()
-            for direction in Direction:
-                nxt = _next_position(current, direction)
-                if _inside(snapshot, nxt) and nxt not in obstacles and nxt not in visited:
-                    visited.add(nxt)
-                    queue.append(nxt)
-        return len(visited)
+                if new_head in new_body[1:]:
+                    continue
+
+                # State sudah pernah dikunjungi
+                if new_head in visited:
+                    continue
+
+                frontier.append(
+                    (
+                        new_body,
+                        first_move or move,
+                        cost + 1
+                    )
+                )
+                generated += 1
+
+
+        if result is None:
+            result = legal_moves[0]
+
+        elapsed = time.perf_counter() - start_time
+        self.total_expanded += expanded
+        self.total_generated += generated
+        self.total_time += elapsed
+        self.total_searches += 1
+        print(
+            f"BFS: expanded={expanded}, generated={generated}, "
+            f"path_cost={result_cost}, time={elapsed:.6f}s | "
+            f"TOTAL: searches={self.total_searches}, "
+            f"expanded={self.total_expanded}, "
+            f"generated={self.total_generated}, "
+            f"time={self.total_time:.6f}s"
+        )
+        return result
 
 
 # ---------------------------------------------------------------------------
 # Alpha-Beta Pruning - Multiplayer / AI vs AI
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class SearchSnake:
-    body: tuple[Position, ...]
-    direction: Direction
-    score: int
-
-
-@dataclass(frozen=True)
-class SearchState:
-    snakes: tuple[tuple[str, SearchSnake], ...]
-    apples: frozenset[Position]
-    active_id: str
-
-    def get_snake(self, snake_id: str) -> SearchSnake:
-        for sid, snake in self.snakes:
-            if sid == snake_id:
-                return snake
-        raise KeyError(snake_id)
-
-
+# --------------------------------------------------------------------------
 @register_strategy("Alpha-Beta")
 class AlphaBetaStrategy(MoveStrategy):
-    """Depth-limited minimax with Alpha-Beta pruning.
-
-    In AI-vs-AI mode the other snake is modeled as the minimizing player.
-    The evaluation rewards score, proximity to apples, mobility, and open space.
-    """
-
-    def __init__(self, depth: int = 3):
-        self.depth = depth
-        self.root_id = ""
-        self.opponent_id = ""
-        self._rows = 0
-        self._columns = 0
-
+    MAX_DEPTH = 3
     def choose_move(self, snapshot: GameSnapshot, snake_id: str, rng: Random) -> Direction:
-        legal = snapshot.legal_moves_for(snake_id)
+        start_time = time.perf_counter()
+        states_generated = 0
+        states_evaluated = 0
+        states_pruned = 0
+        legal_moves = snapshot.legal_moves_for(snake_id)
         snake = snapshot.snake(snake_id)
-        if not legal:
+
+        if not legal_moves:
             return snake.direction
 
-        # Alpha-Beta is most meaningful when there are two snakes.
-        if len(snapshot.snakes) < 2:
-            return self._best_single_move(snapshot, snake_id, legal)
+        opponent = next((other for other in snapshot.snakes if other.snake_id != snake_id),None,)
 
-        self.root_id = snake_id
-        self._rows = snapshot.rows
-        self._columns = snapshot.columns
-        self.opponent_id = next(s.snake_id for s in snapshot.snakes if s.snake_id != snake_id)
-        state = self._make_state(snapshot)
+        if opponent is None:
+            return legal_moves[0]
 
-        best_score = -inf
-        best_moves: list[Direction] = []
-        alpha, beta = -inf, inf
+        opponent_id = opponent.snake_id
 
-        for move in legal:
-            child = self._apply_move(state, snake_id, move, snapshot)
-            score = self._alphabeta(child, self.depth - 1, alpha, beta)
-            if score > best_score:
-                best_score = score
-                best_moves = [move]
-            elif score == best_score:
-                best_moves.append(move)
-            alpha = max(alpha, best_score)
+        snakes = {current.snake_id: {"body": tuple(current.body), "direction": current.direction,
+                "score": current.score,} for current in snapshot.snakes}
 
-        return rng.choice(best_moves or list(legal))
+        apples = set(snapshot.apples)
 
-    def _best_single_move(self, snapshot: GameSnapshot, snake_id: str, legal: tuple[Direction, ...]) -> Direction:
-        snake = snapshot.snake(snake_id)
-        if not snapshot.apples:
-            return legal[0]
-        hx, hy = snake.body[0]
-        return min(
-            legal,
-            key=lambda d: min(
-                abs(hx + d.vector[0] - ax) + abs(hy + d.vector[1] - ay)
-                for ax, ay in snapshot.apples
-            ),
+        def evaluate(state, remaining_apples):
+            me = state[snake_id]
+            other = state[opponent_id]
+
+            score_difference = me["score"] - other["score"]
+
+            if not remaining_apples:
+                return score_difference * 1000
+
+            my_head = me["body"][0]
+            other_head = other["body"][0]
+
+            my_distance = min(abs(my_head[0] - x) + abs(my_head[1] - y) for x, y in remaining_apples)
+
+            other_distance = min(abs(other_head[0] - x) + abs(other_head[1] - y) for x, y in remaining_apples)
+
+            return (score_difference * 100 + other_distance - my_distance)
+
+        def get_legal_moves(state, remaining_apples, current_id):
+            current = state[current_id]
+            body = current["body"]
+            head = body[0]
+
+            moves = []
+
+            for move in Direction:
+                if (len(body) > 1 and move is current["direction"].opposite):
+                    continue
+
+                dx, dy = move.vector
+                new_head = (head[0] + dx, head[1] + dy)
+
+                x, y = new_head
+
+                # Cek batas board
+                if not (0 <= x < snapshot.columns and 0 <= y < snapshot.rows):
+                    continue
+
+                growing = new_head in remaining_apples
+
+                own_body = body if growing else body[:-1]
+
+                # Cek tabrakan dengan tubuh sendiri
+                if new_head in own_body:
+                    continue
+
+                # Cek tabrakan dengan snake lain
+                hits_other_snake = any(new_head in other["body"] for other_id, other in state.items() if other_id != current_id)
+
+                if hits_other_snake:
+                    continue
+
+                moves.append(move)
+            return moves
+
+        # =========================================================
+        # APPLY MOVE
+        # =========================================================
+
+        def apply_move(state, remaining_apples, current_id, move):
+            new_state = {sid: {
+                    "body": tuple(data["body"]),
+                    "direction": data["direction"],
+                    "score": data["score"],}
+                for sid, data in state.items()}
+
+            new_apples = set(remaining_apples)
+
+            current = new_state[current_id]
+            body = current["body"]
+
+            dx, dy = move.vector
+
+            head_x, head_y = body[0]
+
+            new_head = (head_x + dx, head_y + dy)
+
+            # Jika mendapatkan apple
+            if new_head in new_apples:
+                new_body = ((new_head,) + body)
+                new_apples.remove(new_head)
+                new_score = current["score"] + 1
+
+            # Jika tidak mendapatkan apple
+            else:
+                new_body = ((new_head,) + body[:-1])
+                new_score = current["score"]
+
+            new_state[current_id] = {"body": new_body, "direction": move, "score": new_score,}
+            return new_state, new_apples
+
+        def alpha_beta(state, remaining_apples, current_id, depth, alpha, beta):
+            nonlocal states_generated
+            nonlocal states_evaluated
+            nonlocal states_pruned
+
+            if depth == 0 or not remaining_apples:
+                states_evaluated += 1
+                return evaluate(state, remaining_apples)
+
+            moves = get_legal_moves(state, remaining_apples, current_id)
+
+            if not moves:
+                states_evaluated += 1
+                if current_id == snake_id:
+                    return -10000
+                return 10000
+
+            next_id = (opponent_id if current_id == snake_id else snake_id)
+
+            if current_id == snake_id:
+                best_value = float("-inf")
+                for move in moves:
+                    next_state, next_apples = apply_move(state, remaining_apples, current_id, move)
+
+                    states_generated += 1
+
+                    value = alpha_beta(next_state, next_apples, next_id, depth - 1, alpha, beta)
+
+                    best_value = max(best_value, value)
+
+                    alpha = max(alpha, best_value)
+
+                    if beta <= alpha:
+                        states_pruned += 1
+                        break
+
+                return best_value
+
+
+            else:
+
+                best_value = float("inf")
+
+                for move in moves:
+
+                    next_state, next_apples = apply_move(state, remaining_apples, current_id, move)
+
+                    states_generated += 1
+
+                    value = alpha_beta(next_state, next_apples, next_id, depth - 1, alpha, beta)
+
+                    best_value = min(best_value, value)
+
+                    beta = min(beta, best_value)
+
+                    if beta <= alpha:
+                        states_pruned += 1
+                        break
+
+                return best_value
+
+        best_move = legal_moves[0]
+        best_value = float("-inf")
+
+        alpha = float("-inf")
+        beta = float("inf")
+
+        for move in legal_moves:
+            next_state, next_apples = apply_move(snakes, apples, snake_id, move)
+
+            states_generated += 1
+
+            value = alpha_beta(next_state, next_apples, opponent_id, self.MAX_DEPTH - 1, alpha, beta)
+
+            if value > best_value:
+
+                best_value = value
+                best_move = move
+
+            alpha = max(
+                alpha,
+                best_value
+            )
+
+        # =========================================================
+        # PERFORMANCE METRICS
+        # =========================================================
+
+        elapsed = time.perf_counter() - start_time
+
+        print(
+            f"Alpha-Beta: depth={self.MAX_DEPTH}, "
+            f"generated={states_generated}, "
+            f"evaluated={states_evaluated}, "
+            f"pruned={states_pruned}, "
+            f"time={elapsed:.6f}s"
         )
 
-    def _make_state(self, snapshot: GameSnapshot) -> SearchState:
-        snakes = tuple(
-            (s.snake_id, SearchSnake(s.body, s.direction, s.score))
-            for s in snapshot.snakes
-        )
-        return SearchState(snakes, frozenset(snapshot.apples), snapshot.active_snake_id)
-
-    def _legal_moves(self, state: SearchState, snake_id: str, snapshot: GameSnapshot) -> tuple[Direction, ...]:
-        snake = state.get_snake(snake_id)
-        legal: list[Direction] = []
-        for direction in Direction:
-            if len(snake.body) > 1 and direction is snake.direction.opposite:
-                continue
-            new_head = _next_position(snake.body[0], direction)
-            if self._collision_with_snapshot(state, snake_id, new_head, new_head in state.apples, snapshot) is None:
-                legal.append(direction)
-        return tuple(legal)
-
-    def _apply_move(self, state: SearchState, snake_id: str, direction: Direction, snapshot: GameSnapshot) -> SearchState:
-        # Use the real board dimensions from snapshot. This method intentionally
-        # mirrors GameEngine.step's sequential movement semantics.
-        snake = state.get_snake(snake_id)
-        new_head = _next_position(snake.body[0], direction)
-        growing = new_head in state.apples
-
-        if self._collision_with_snapshot(state, snake_id, new_head, growing, snapshot) is not None:
-            # Illegal branches are normally never generated. Keep this defensive.
-            return state
-
-        new_body = (new_head,) + (snake.body if growing else snake.body[:-1])
-        new_score = snake.score + (1 if growing else 0)
-        new_snakes = tuple(
-            (sid, SearchSnake(new_body, direction if sid == snake_id else s.direction, new_score if sid == snake_id else s.score))
-            for sid, s in state.snakes
-        )
-        apples = state.apples - {new_head} if growing else state.apples
-        next_id = self.opponent_id if snake_id == self.root_id else self.root_id
-        return SearchState(new_snakes, frozenset(apples), next_id)
-
-    def _collision_with_snapshot(
-        self, state: SearchState, snake_id: str, new_head: Position, growing: bool, snapshot: GameSnapshot
-    ) -> str | None:
-        x, y = new_head
-        if x < 0 or x >= snapshot.columns or y < 0 or y >= snapshot.rows:
-            return "wall"
-        moving = state.get_snake(snake_id)
-        own = moving.body if growing else moving.body[:-1]
-        if new_head in own:
-            return "self"
-        for other_id, other in state.snakes:
-            if other_id != snake_id and new_head in other.body:
-                return "other"
-        return None
-
-    def _alphabeta(self, state: SearchState, depth: int, alpha: float, beta: float) -> float:
-        if depth <= 0 or not state.apples:
-            return self._evaluate(state)
-
-        legal = self._legal_moves(state, state.active_id, self._current_snapshot_stub(state))
-        if not legal:
-            return -10_000 if state.active_id == self.root_id else 10_000
-
-        if state.active_id == self.root_id:
-            value = -inf
-            for move in legal:
-                child = self._apply_move(state, state.active_id, move, self._current_snapshot_stub(state))
-                value = max(value, self._alphabeta(child, depth - 1, alpha, beta))
-                alpha = max(alpha, value)
-                if alpha >= beta:
-                    break
-            return value
-
-        value = inf
-        for move in legal:
-            child = self._apply_move(state, state.active_id, move, self._current_snapshot_stub(state))
-            value = min(value, self._alphabeta(child, depth - 1, alpha, beta))
-            beta = min(beta, value)
-            if alpha >= beta:
-                break
-        return value
-
-    def _current_snapshot_stub(self, state: SearchState) -> GameSnapshot:
-        # Only dimensions are needed by search; the dimensions are injected by
-        # choose_move into the instance before recursion.
-        return GameSnapshot(
-            rows=self._rows,
-            columns=self._columns,
-            snakes=tuple(
-                SnakeView(sid, s.body, s.direction, s.score)
-                for sid, s in state.snakes
-            ),
-            apples=tuple(state.apples),
-            rounds_completed=0,
-            rounds_remaining=999,
-            active_snake_id=state.active_id,
-            legal_moves=(),
-        )
-
-    def _evaluate(self, state: SearchState) -> float:
-        me = state.get_snake(self.root_id)
-        opponent = state.get_snake(self.opponent_id)
-        score = 100.0 * (me.score - opponent.score)
-
-        if state.apples:
-            my_dist = min(abs(me.body[0][0] - x) + abs(me.body[0][1] - y) for x, y in state.apples)
-            op_dist = min(abs(opponent.body[0][0] - x) + abs(opponent.body[0][1] - y) for x, y in state.apples)
-            score += 3.0 * (op_dist - my_dist)
-
-        score += 1.5 * (len(self._legal_moves(state, self.root_id, self._current_snapshot_stub(state))) - len(self._legal_moves(state, self.opponent_id, self._current_snapshot_stub(state))))
-        return score
+        return best_move
