@@ -383,7 +383,11 @@ class UCSStrategy(MoveStrategy):
 
         @register_strategy("Minimax")
         class MinimaxStrategy(MoveStrategy):
-            MAX_DEPTH = 3
+            MAX_DEPTH = 1
+            def __init__(self):
+                self.total_states_generated = 0
+                self.total_states_evaluated = 0
+                self.total_elapsed = 0
 
             def choose_move(
                     self, snapshot: GameSnapshot, snake_id: str, rng: Random
@@ -621,12 +625,20 @@ class UCSStrategy(MoveStrategy):
                         best_move = move
 
                 elapsed = time.perf_counter() - start_time
+                self.total_elapsed += elapsed
+                self.total_states_evaluated += states_evaluated
+                self.total_states_generated += states_generated
 
                 print(
                     f"Minimax: depth={self.MAX_DEPTH}, "
                     f"generated={states_generated}, "
                     f"evaluated={states_evaluated}, "
                     f"time={elapsed:.6f}s"
+                )
+                print(
+                    f"Total: generated={self.total_states_generated}, "
+                    f"evaluated={self.total_states_evaluated}, "
+                    f"time={self.total_elapsed:.6f}s"
                 )
 
                 return best_move
@@ -743,7 +755,12 @@ class BFSStrategy(MoveStrategy):
 # --------------------------------------------------------------------------
 @register_strategy("Alpha-Beta")
 class AlphaBetaStrategy(MoveStrategy):
-    MAX_DEPTH = 3
+    MAX_DEPTH = 1
+    def __init__(self):
+        self.total_states_generated = 0
+        self.total_states_evaluated = 0
+        self.total_states_pruned = 0
+        self.total_elapsed = 0
     def choose_move(self, snapshot: GameSnapshot, snake_id: str, rng: Random) -> Direction:
         start_time = time.perf_counter()
         states_generated = 0
@@ -919,6 +936,7 @@ class AlphaBetaStrategy(MoveStrategy):
 
                 return best_value
 
+
         best_move = legal_moves[0]
         best_value = float("-inf")
 
@@ -954,6 +972,16 @@ class AlphaBetaStrategy(MoveStrategy):
             f"evaluated={states_evaluated}, "
             f"pruned={states_pruned}, "
             f"time={elapsed:.6f}s"
+        )
+        self.total_states_generated += states_generated
+        self.total_states_evaluated += states_evaluated
+        self.total_states_pruned += states_pruned
+        self.total_elapsed += elapsed
+        print(
+            f"Total: Generated={self.total_states_generated},"
+            f"evaluated={self.total_states_evaluated}, "
+            f"pruned={self.total_states_pruned}, "
+            f"time={self.total_elapsed:.6f}s"
         )
 
         return best_move
