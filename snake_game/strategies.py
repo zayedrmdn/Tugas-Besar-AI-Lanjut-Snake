@@ -985,3 +985,145 @@ class AlphaBetaStrategy(MoveStrategy):
         )
 
         return best_move
+
+
+@register_strategy("MCTS")
+class MCTSStrategy(MoveStrategy):
+    ITERATIONS = 200
+    ROLLOUT_ROUNDS = 20
+    EXPLORATION = 1.41
+
+    def choose_move(self, snapshot, snake_id, rng):
+        from math import log, sqrt
+
+        start_time = time.perf_counter()
+        states_generated = 0
+        states_evaluated = 0
+
+        legal_moves = snapshot.legal_moves_for(snake_id)
+        snake = snapshot.snake(snake_id)
+        opponent = next((other for other in snapshot.snakes if other.snake_id != snake_id), None)
+        if not legal_moves or opponent is None:
+            return legal_moves[0] if legal_moves else snake.direction
+        opponent_id = opponent.snake_id
+
+        def other_player(player_id):
+            return opponent_id if player_id == snake_id else snake_id
+
+        def score_difference(state):
+            return state["snakes"][snake_id]["score"] - state["snakes"][opponent_id]["score"]
+
+        def get_legal_moves(state):
+            player = state["snakes"][state["turn"]]
+            enemy_body = state["snakes"][other_player(state["turn"])]["body"]
+            head_x, head_y = player["body"][0]
+            moves = []
+            for move in Direction:
+                if len(player["body"]) > 1 and move is player["direction"].opposite:
+                    continue
+                dx, dy = move.vector
+                new_head = (head_x + dx, head_y + dy)
+                if not (0 <= new_head[0] < snapshot.columns and 0 <= new_head[1] < snapshot.rows):
+                    continue
+                if new_head in state["apples"]:
+                    own_body = player["body"]
+                else:
+                    own_body = player["body"][:-1]
+                if new_head in own_body or new_head in enemy_body:
+                    continue
+                moves.append(move)
+            return moves
+
+        def apply_move(state, move):
+            player_id = state["turn"]
+            player = state["snakes"][player_id]
+            dx, dy = move.vector
+            new_head = (player["body"][0][0] + dx, player["body"][0][1] + dy)
+            apples = state["apples"]
+            score = player["score"]
+            if new_head in apples:
+                body = (new_head,) + player["body"]
+                apples = apples - {new_head}
+                score += 1
+            else:
+                body = (new_head,) + player["body"][:-1]
+            snakes = dict(state["snakes"])
+            snakes[player_id] = {"body": body, "direction": move, "score": score}
+            return {"snakes": snakes, "apples": apples, "turn": other_player(player_id), "over": not apples}
+
+        def stuck_player_loses(state):
+            snakes = dict(state["snakes"])
+            stuck = dict(snakes[state["turn"]])
+            stuck["score"] -= 1
+            snakes[state["turn"]] = stuck
+            return {"snakes": snakes, "apples": state["apples"], "turn": state["turn"], "over": True}
+
+        def random_playout(state):
+            nonlocal states_generated
+            for _ in range(self.ROLLOUT_ROUNDS * 2):
+                if state["over"]:
+                    break
+                moves = get_legal_moves(state)
+                if not moves:
+                    state = stuck_player_loses(state)
+                    break
+                state = apply_move(state, rng.choice(moves))
+                states_generated += 1
+            return score_difference(state) - start_difference
+
+        def new_node(state, move, parent):
+            untried = [] if state["over"] else get_legal_moves(state)
+            return {"state": state, "move": move, "parent": parent, "children": [],
+                    "untried": untried, "visits": 0, "total": 0}
+
+        def pick_child_by_ucb1(node):
+            best_child = None
+            best_score = -inf
+            for child in node["children"]:
+                average = child["total"] / child["visits"]
+                if node["state"]["turn"] == opponent_id:
+                    average = -average  # the opponent picks the move that is worst for us
+                score = average + self.EXPLORATION * sqrt(log(node["visits"]) / child["visits"])
+                if score > best_score:
+                    best_score = score
+                    best_child = child
+            return best_child
+
+        start_state = {
+            "snakes": {
+                current.snake_id: {"body": tuple(current.body), "direction": current.direction, "score": current.score}
+                for current in snapshot.snakes
+            },
+            "apples": frozenset(snapshot.apples),
+            "turn": snake_id,
+            "over": False,
+        }
+        start_difference = score_difference(start_state)
+        root = new_node(start_state, None, None)
+
+        for _ in range(self.ITERATIONS):
+            node = root
+            while not node["untried"] and node["children"]:
+                node = pick_child_by_ucb1(node)
+
+            if node["untried"]:
+                move = node["untried"].pop()
+                child = new_node(apply_move(node["state"], move), move, node)
+                node["children"].append(child)
+                states_generated += 1
+                node = child
+
+            reward = random_playout(node["state"])
+            states_evaluated += 1
+
+            while node is not None:
+                node["visits"] += 1
+                node["total"] += reward
+                node = node["parent"]
+
+        best_child = max(root["children"], key=lambda child: child["visits"])
+
+        elapsed = time.perf_counter() - start_time
+        print(f"MCTS: iterations={self.ITERATIONS}, generated={states_generated}, "
+              f"evaluated={states_evaluated}, time={elapsed:.4f}s")
+        return best_child["move"]
